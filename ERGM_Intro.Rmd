@@ -1,0 +1,149 @@
+---
+title: "Methods Tutorial for ERGM (Introduction)"
+author: Ilayda Onder
+date: 04/02/2020
+output: html_notebook
+---
+
+# ERGM 
+
+Exponential random graph models (ERGMs) are a family of statistical models for analyzing network data. Like other statistical models for analyzing network data, ERGM is designed to account for the dependence among relationships in network data. To do that, ERGMs use a Markov chain Monte Carlo algorithm.
+
+The main advantage of ERGMs over other statistical models for analyzing networks is that ERGMs allow you to estimate the effects of covariates on the ties in the network while simultenously accounting for the forms of dependences that may exist in the data. This means thats ERGMs can model both exogenous effects (covariates) and endogenous effects (network structure). In other words, ERGMs simultenously estimate node level effects (race, gender etc.) and network effects (reciprocity, transitivity etc.). ERGMs are especially useful if the researcher believes that the network structure itself influences the establishment of ties or that the ties emerges not only from node attributes, but also from the relational dynamics present in the network. 
+
+One limitation of basic ERGMs is that they can only handle binary outcomes. Another limitation is that they cannot model longitudinal network data. However, there are extensions to ERGMs that allow you to model non-binary or longitudinal data. 
+
+# LOAD PACKAGES
+
+```{r load libraries}
+library(RCurl) # load data from github
+library(ggnetwork) # fruchtermanreingold algorithm
+library(ggplot2) 
+
+options(scipen = 12) # bias against scientific notation
+options(digits = 4) # show fewer decimal places
+```
+
+# DATA
+
+In this tutorial, I use network data on the conflictual ties among 30 Syrian rebel groups. Data come from Gade et al. (2019)'s *Fratricide in rebel movements: A network analysis of Syrian militant infighting*. The data can be found [here](https://github.com/ilaydaonder/PLSC508).
+
+In this paper, the authors look at how rebel groups’ power, ideology, and state sponsors impact their propensity to clash. The conflict data among Syrian rebel groups were drawn from infighting claims made by each rebel group on social media. Apart from the adjacency matrices that contain information on conflict ties, the authors provide a separate dataset containing information on the group sizes, military capabilities and ideologies of each rebel group.
+
+## Load data
+
+I first load the data from my github repository and do some cleaning to correct rownames etc. Then, I convert the data frame to a 30 x 30 matrix object. 
+
+```{r load data}
+url <- getURL("https://raw.githubusercontent.com/ilaydaonder/ERGM_Intro/master/Infighting30_2014_6Sep2017.csv")
+infight.df <- read.csv(text = url,
+                       stringsAsFactors = F,
+                       header = T)
+infight.df$X <- as.character(infight.df$X)
+rm(url)
+
+infight <- infight.df # replicate data frame
+row.names(infight) <- infight$X # make the first column rownames
+infight[1] <- NULL # delete first column
+infight <- as.matrix(infight) # convert data frame to matrix
+```
+
+## Create netwok object
+
+I create the netwok object. I specify the network as a directed network.
+
+```{r create network object}
+library(network) # to create network objects
+net1 <- network(infight, 
+                matrix.type = 'adjacency', 
+                directed = T,
+                ignore.eval = F,
+                names.eval = "weight")
+```
+
+## Add network attributes
+
+Next, I load the network attributes data from my github repository. I do some cleaning to convert some covariates to character and some others to numeric. Then, I add node attributes to my network object. Here, I am interested in four node attributes: group size (measured as the number of militants), power broker role (a dummy for whether or not the group might play a power broker role in Syrian civil war), and an Islamist ideology (a five point ordinal variable measuring the degree of each group's commitment to an Islamist ideology).
+
+```{r load network attributes}
+url <- getURL("https://raw.githubusercontent.com/ilaydaonder/ERGM_Intro/master/IdeologyVars_JPR.csv")
+attr <- read.csv(text = url, 
+                     stringsAsFactors = F,
+                     header = T)
+rm(url)
+attr$Powerbroker <- as.character(attr$Powerbroker)
+attr$Islamism.Salafism <- as.numeric(attr$Islamism.Salafism)
+attr$GroupSize <- as.numeric(attr$GroupSize)
+
+library(network) # to create network objects
+set.vertex.attribute(net1, 'group_size', attr$GroupSize) # add group size variable
+set.vertex.attribute(net1, 'power_broker', attr$Powerbroker) # add power broker variable
+set.vertex.attribute(net1, 'islamism', attr$Islamism.Salafism) # add islamism variable
+set.vertex.attribute(net1, 'labels', attr$GroupCode) # add group names
+detach("package:network", unload = TRUE)
+```
+
+## Visualize the network
+
+I use Fruchterman–Reingold algorithm to visualize this network. The sizes of the nodes are adjusted based on the rebel group’s size (measured as the log of the number of its militants). As seen in the network plot, 8 groups never fought against another group. They stand as isolated. These isolates are all relatively smaller in size. All the larger groups have engaged in fighting with other groups. Not surprisingly, ISIS had fought with almost all other groups.
+
+```{r visualize}
+set.seed(123456)
+net1_fr <- ggnetwork(net1, layout = 'fruchtermanreingold')
+
+ggplot(data = net1_fr, aes(x, y, xend = xend, yend = yend)) +
+  geom_edges(color = 'grey75', size = 0.5) +
+  geom_nodes(aes(size = group_size), color = "black") +
+  geom_nodetext_repel(aes(label = labels), size = 3) +
+  theme_blank() +
+  theme(legend.position = "bottom") +
+  guides(size = F) +
+  labs(title = 'Figure 1: Network of Syrian militant infighting',
+       subtitle = "Node size adjusted for group size")
+```
+
+# FIT ERGM MODEL WITH COVARIATES
+
+We use the ergm command in the ergm package. The first model argument is the name of our network object. The second argument has to be **edges**. Next, we specify our model covariates. 
+
+ERGMs consider for how dyadic node attributes affect tie formation patterns. That's why, we will need to specify our node attributes in a dyadic manner. I use **absdiff** function to find the absolute difference in the group sizes of each dyadic pair of rebel groups. I use the same function to find the absolute differences in the Islamist ideology scores of each dyadic pair of rebel groups. Finally, I use the **nodematch** command to find each dyadic pair of rebel groups that are either both power-brokers or both non-power-brokers. 
+
+We can see that dyadic pairs of rebel groups that are different in size are more likely to clash with each other. Similarly, dyadic pairs of rebel groups that are different with regards to their Islamist ideology scores are more likely to clash with other. It seems like the power broker variable has no effect on the propensity to clash. 
+
+```{r}
+library(ergm)
+ergm.fit <- ergm(net1 ~ 
+                   edges + 
+                   absdiff("group_size") +
+                   absdiff("islamism") +
+                   nodematch("power_broker"))
+summary(ergm.fit)
+```
+
+## Fit another ERGM model with both covariates and network structure variables
+
+As explained int he introduction, ERGMs can simultenously estimate node level effects and network effects. So far, we only estimated node level effects. Let's include in our model a structural characteristic of our network. 
+
+It is possible that covariates alone do not capture everything that makes some rebel groups more prone to conflict with other groups. It is likely that conflict networks like this exhibit an effect similar to the "popularity" of the rebel group. Once rebel group A starts clashing with a few other groups, it may become "popular" in the sense that all the other rebel groups may start targeting rebel group A. In the context of ERGMs, we can capture this popularity component with a two-star statistic. A two-star statistic will capture the number of times when two rebel groups are fighting against the same rebel group. I use the **istar(2)** function to include the two-star statistic. 
+
+Including a network structure variable slightly changed our estimations. Power broker is now significant. Dyadic pairs of rebel groups, which include two power broker groups, are more likely to experience clashes than dyadic pairs that include one power broker and one non-power-broker. In addition, the positive and significant coefficient on the two-star statistic suggests that there are factors beyond the node level covariates that influence the propensity of rebel groups to clash with other. 
+
+```{r}
+library(ergm)
+ergm.fit2 <- ergm(net1 ~ 
+                   edges + 
+                   absdiff("group_size") +
+                   absdiff("islamism") +
+                   nodematch("power_broker") +
+                   istar(2))
+summary(ergm.fit2)
+```
+
+
+
+
+
+
+
+
+
